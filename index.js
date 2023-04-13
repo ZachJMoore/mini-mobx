@@ -18,7 +18,7 @@ const autorun = (fn) => {
   const currentReads = new Set(reads);
 
   if (currentReads.size) {
-    const previousReads = new Set(); // less performant, but should build up all code paths: subscriptions.get(fn)?.reads || new Set();
+    const previousReads = new Set(); // alternative is less performant, but would build up all code paths: subscriptions.get(fn)?.reads || new Set();
 
     subscriptions.set(fn, {
       reads: new Set(currentReads, previousReads),
@@ -44,6 +44,22 @@ const observable = (target, key) => {
     });
   };
 
+  const builtInWrites = [];
+  const builtInReads = [];
+
+  const wrapWithObservable = (targetValue) => {
+    if (typeof targetValue === "object") {
+      Object.keys(targetValue)
+        .filter((key) => {
+          // wasn't sure how to get around wrapWithRead & wrapWithWrite adding values directly to the value (instead of the prototype), so I'm filtering them out here
+          return !builtInWrites.includes(key) && !builtInReads.includes(key);
+        })
+        .forEach((key) => {
+          observable(targetValue, key);
+        });
+    }
+  };
+
   const wrapWithRead = (functionName) => {
     const original = internalState[functionName];
     internalState[functionName] = (...args) => {
@@ -56,24 +72,28 @@ const observable = (target, key) => {
     const original = internalState[functionName];
     internalState[functionName] = (...args) => {
       original.apply(internalState, args);
+      wrapWithObservable(internalState); // recursively make all properties observable after a write
       runSubscriptions();
     };
   };
 
   if (internalState instanceof Set) {
-    SET_WRITES.forEach(wrapWithWrite);
-    SET_READS.forEach(wrapWithRead);
+    builtInWrites.push(...SET_WRITES);
+    builtInReads.push(...SET_READS);
   }
 
   if (internalState instanceof Map) {
-    MAP_WRITES.forEach(wrapWithWrite);
-    MAP_READS.forEach(wrapWithRead);
+    builtInWrites.push(...MAP_WRITES);
+    builtInReads.push(...MAP_READS);
   }
 
   if (Array.isArray(internalState)) {
-    ARRAY_WRITES.forEach(wrapWithWrite);
-    ARRAY_READS.forEach(wrapWithRead);
+    builtInWrites.push(...ARRAY_WRITES);
+    builtInReads.push(...ARRAY_READS);
   }
+
+  builtInWrites.forEach(wrapWithWrite);
+  builtInReads.forEach(wrapWithRead);
 
   Object.defineProperty(target, key, {
     get() {
@@ -87,11 +107,7 @@ const observable = (target, key) => {
   });
 
   // recursively make all properties observable
-  if (typeof internalState === "object") {
-    Object.keys(internalState).forEach((key) => {
-      observable(internalState, key);
-    });
-  }
+  wrapWithObservable(internalState);
 };
 
 const makeObservable = (target, props) => {
@@ -212,34 +228,41 @@ const johnsTodo = new Todo({
   description: "I have amazing things to do",
   completed: false,
 });
-
 todoList.addTodo(johnsTodo);
-
 johnsTodo.setCompleted(true);
 
 // add a guest and a todo for them
 todoList.addGuest({
-  id: 2,
-  firstName: "Jane",
+  id: 3,
+  firstName: "Jack",
   lastName: "Doe",
 });
-
-const janesTodo = new Todo({
-  authorId: 2,
+const jacksTodo = new Todo({
+  authorId: 3,
   title: "This is a task",
   description: "I have amazing things to do",
   completed: false,
 });
+todoList.addTodo(jacksTodo);
+jacksTodo.setCompleted(true);
 
+// add another guest and a todo for them
+todoList.addGuest({
+  id: 3,
+  firstName: "Jane",
+  lastName: "Doe",
+});
+const janesTodo = new Todo({
+  authorId: 3,
+  title: "This is a task",
+  description: "I have amazing things to do",
+  completed: false,
+});
 todoList.addTodo(janesTodo);
+janesTodo.setCompleted(true);
 
 // jane changed her first name
-todoList.guests[0].firstName = "Janet";
-
-// log all subscription reads
-subscriptions.forEach((subscription) => {
-  console.log([...subscription.reads]);
-});
+todoList.guests[1].firstName = "Janet";
 
 cleanupCollaboration();
 cleanupCompleted();
