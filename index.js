@@ -1,34 +1,37 @@
-// CONSTANTS
-const SET_WRITES = ["add", "delete", "clear"];
-const SET_READS = ["has", "size", "values", "entries", "forEach"];
-const MAP_WRITES = ["set", "delete", "clear"];
-const MAP_READS = ["has", "size", "values", "entries", "forEach", "get"];
-// prettier-ignore
-const ARRAY_WRITES = ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill"];
-// prettier-ignore
-const ARRAY_READS = ["concat", "includes", "indexOf", "join", "lastIndexOf", "slice", "toString", "toLocaleString", "entries", "keys", "values", "find", "findIndex", "filter", "map", "reduce", "reduceRight", "every", "some", "forEach"];
+const BUILT_IN_WRITES = {
+  ["Set"]: ["add", "delete", "clear"],
+  ["Map"]: ["set", "delete", "clear"],
+  // prettier-ignore
+  ["Array"]: ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill"],
+};
+
+const BUILT_IN_READS = {
+  ["Set"]: ["has", "size", "values", "entries", "forEach"],
+  ["Map"]: ["has", "size", "values", "entries", "forEach", "get"],
+  // prettier-ignore
+  ["Array"]: ["concat", "includes", "indexOf", "join", "lastIndexOf", "slice", "toString", "toLocaleString", "entries", "keys", "values", "find", "findIndex", "filter", "map", "reduce", "reduceRight", "every", "some", "forEach"],
+};
 
 // FUNCTIONS AND GLOBAL STATE
 const reads = new Set();
 const subscriptions = new Map();
+const observables = new Set();
 
 const autorun = (fn) => {
   reads.clear();
   fn();
   const currentReads = new Set(reads);
 
-  if (currentReads.size) {
-    const previousReads = new Set(); // alternative is less performant, but would build up all code paths: subscriptions.get(fn)?.reads || new Set();
+  if (!currentReads.size) return () => {}; // no reads, no need to subscribe, nothing to cleanup
 
-    subscriptions.set(fn, {
-      reads: new Set(currentReads, previousReads),
-      function: fn,
-    });
-  }
+  const previousReads = new Set(); // alternative is less performant, but would build up all code paths: subscriptions.get(fn)?.reads || new Set();
 
-  return () => {
-    subscriptions.delete(fn);
-  };
+  subscriptions.set(fn, {
+    reads: new Set(currentReads, previousReads),
+    function: fn,
+  });
+
+  return () => subscriptions.delete(fn);
 };
 
 const observable = (target, key) => {
@@ -36,28 +39,28 @@ const observable = (target, key) => {
 
   const keySymbol = Symbol(`${key}`); // unique symbol for each key to avoid collisions with other keys
 
+  observables.add(keySymbol);
+
+  const internalStateType =
+    internalState?.constructor?.name || typeof internalState;
+
+  const builtInWrites = BUILT_IN_WRITES[internalStateType] || []; // built in functions that make changes to the value
+  const builtInReads = BUILT_IN_READS[internalStateType] || []; // built in functions that read the value
+
   const runSubscriptions = () => {
     subscriptions.forEach((subscription) => {
-      if (subscription.reads.has(keySymbol)) {
-        autorun(subscription.function); // recapture reads and alter the subscription for if/else and different code paths
-      }
+      if (!subscription.reads.has(keySymbol)) return;
+      autorun(subscription.function); // recapture reads and alter the subscription for if/else and different code paths
     });
   };
 
-  const builtInWrites = [];
-  const builtInReads = [];
+  const recursivelyWrapInObservable = () => {
+    if (typeof internalState !== "object") return;
 
-  const wrapWithObservable = (targetValue) => {
-    if (typeof targetValue === "object") {
-      Object.keys(targetValue)
-        .filter((key) => {
-          // wasn't sure how to get around wrapWithRead & wrapWithWrite adding values directly to the value (instead of the prototype), so I'm filtering them out here
-          return !builtInWrites.includes(key) && !builtInReads.includes(key);
-        })
-        .forEach((key) => {
-          observable(targetValue, key);
-        });
-    }
+    Object.keys(internalState)
+      .filter((key) => !builtInReads.includes(key))
+      .filter((key) => !builtInWrites.includes(key))
+      .forEach((key) => observable(internalState, key));
   };
 
   const wrapWithRead = (functionName) => {
@@ -72,25 +75,10 @@ const observable = (target, key) => {
     const original = internalState[functionName];
     internalState[functionName] = (...args) => {
       original.apply(internalState, args);
-      wrapWithObservable(internalState); // recursively make all properties observable after a write
+      recursivelyWrapInObservable(); // make all properties observable after a write
       runSubscriptions();
     };
   };
-
-  if (internalState instanceof Set) {
-    builtInWrites.push(...SET_WRITES);
-    builtInReads.push(...SET_READS);
-  }
-
-  if (internalState instanceof Map) {
-    builtInWrites.push(...MAP_WRITES);
-    builtInReads.push(...MAP_READS);
-  }
-
-  if (Array.isArray(internalState)) {
-    builtInWrites.push(...ARRAY_WRITES);
-    builtInReads.push(...ARRAY_READS);
-  }
 
   builtInWrites.forEach(wrapWithWrite);
   builtInReads.forEach(wrapWithRead);
@@ -106,8 +94,7 @@ const observable = (target, key) => {
     },
   });
 
-  // recursively make all properties observable
-  wrapWithObservable(internalState);
+  recursivelyWrapInObservable(); // observe nested properties
 };
 
 const makeObservable = (target, props) => {
@@ -116,7 +103,7 @@ const makeObservable = (target, props) => {
   });
 };
 
-// FULL EXAMPLE
+// FULL EXAMPLE ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class Todo {
   constructor({ authorId, title, description, completed }) {
@@ -269,3 +256,5 @@ cleanupCompleted();
 
 todoList.clearTodos(); // without the cleanup, this would log "No todos"
 todoList.clearGuests(); // without the cleanup, this would log "John Doe is collaborating with no one"
+
+// console.log(observables);
